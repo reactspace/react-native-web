@@ -13,6 +13,7 @@ import * as React from 'react';
 import StyleSheet from '../StyleSheet';
 import View from '../View';
 import useMergeRefs from '../../modules/useMergeRefs';
+import findNodeHandle from '../findNodeHandle';
 
 type Props = {
   ...ViewProps,
@@ -61,6 +62,38 @@ function normalizeScrollEvent(e) {
   };
 }
 
+
+const normalizeWindowScrollEvent = e => ({
+  nativeEvent: {
+    contentOffset: {
+      get x() {
+        return window.scrollX;
+      },
+      get y() {
+        return window.scrollY;
+      }
+    },
+    contentSize: {
+      get height() {
+        return window.document.documentElement.scrollHeight;
+      },
+      get width() {
+        return window.document.documentElement.scrollWidth;
+      }
+    },
+    layoutMeasurement: {
+      get height() {
+        // outer dimensions do not apply for windows
+        return window.innerHeight;
+      },
+      get width() {
+        return window.innerWidth;
+      }
+    }
+  },
+  timeStamp: Date.now()
+});
+
 function shouldEmitScrollEvent(lastTick: number, eventThrottle: number) {
   const timeSinceLastTick = Date.now() - lastTick;
   return eventThrottle > 0 && timeSinceLastTick >= eventThrottle;
@@ -82,12 +115,15 @@ const ScrollViewBase: React.AbstractComponent<
     showsHorizontalScrollIndicator,
     showsVerticalScrollIndicator,
     style,
+    onLayout,
+    useWindowScrolling = false,
     ...rest
   } = props;
 
   const scrollState = React.useRef({ isScrolling: false, scrollLastTick: 0 });
   const scrollTimeout = React.useRef(null);
   const scrollRef = React.useRef(null);
+  let _windowResizeObserver = null;
 
   function createPreventableScrollHandler(handler: Function) {
     return (e: Object) => {
@@ -99,10 +135,50 @@ const ScrollViewBase: React.AbstractComponent<
     };
   }
 
+  const handleWindowLayout = () => {
+    if (typeof onLayout === 'function') {
+      const layout = {
+        x: 0,
+        y: 0,
+        get width() {
+          return window.innerWidth;
+        },
+        get height() {
+          return window.innerHeight;
+        }
+      };
+      const nativeEvent = {
+        layout
+      };
+      // $FlowFixMe
+      Object.defineProperty(nativeEvent, 'target', {
+        enumerable: true,
+        get: () => findNodeHandle(forwardedRef)
+      });
+      onLayout({
+        nativeEvent,
+        timeStamp: Date.now()
+      });
+    }
+  };
+  const handleWindowTouchMove = createPreventableScrollHandler(() => {
+    if (typeof onTouchMove === 'function') {
+      return onTouchMove();
+    }
+  });
+  const handleWindowWheel = createPreventableScrollHandler(() => {
+    if (typeof onWheel === 'function') {
+      return onWheel();
+    }
+  });
+
   function handleScroll(e: Object) {
     e.stopPropagation();
-    if (e.target === scrollRef.current) {
-      e.persist();
+    const isSameTarget = e.target === (useWindowScrolling ? window.document : scrollRef.current);
+    if (isSameTarget) {
+      if (typeof e.persist === 'function') {
+        e.persist(); // this is a react SyntheticEvent, but not for window scrolling
+      }
       // A scroll happened, so the scroll resets the scrollend timeout.
       if (scrollTimeout.current != null) {
         clearTimeout(scrollTimeout.current);
@@ -122,6 +198,8 @@ const ScrollViewBase: React.AbstractComponent<
     }
   }
 
+  const transformEvent = useWindowScrolling ? normalizeWindowScrollEvent : normalizeScrollEvent;
+
   function handleScrollStart(e: Object) {
     scrollState.current.isScrolling = true;
     handleScrollTick(e);
@@ -130,26 +208,84 @@ const ScrollViewBase: React.AbstractComponent<
   function handleScrollTick(e: Object) {
     scrollState.current.scrollLastTick = Date.now();
     if (onScroll) {
-      onScroll(normalizeScrollEvent(e));
+      onScroll(transformEvent(e));
     }
   }
 
   function handleScrollEnd(e: Object) {
     scrollState.current.isScrolling = false;
     if (onScroll) {
-      onScroll(normalizeScrollEvent(e));
+      onScroll(transformEvent(e));
     }
   }
+
+  function registerWindowHandlers() {
+    window.addEventListener('scroll', handleScroll);
+    window.addEventListener('touchmove', handleWindowTouchMove);
+    window.addEventListener('wheel', handleWindowWheel);
+    window.addEventListener('resize', handleWindowLayout);
+    if (typeof window.ResizeObserver === 'function') {
+      _windowResizeObserver = new window.ResizeObserver((/*entries*/) => {
+        handleWindowLayout();
+      });
+      // handle changes of the window content size.
+      // It technically works with regular onLayout of the container,
+      // but this called very often if the content change based on scrolling, e.g. FlatList
+      _windowResizeObserver.observe(window.document.body);
+    } else if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
+      console.warn(
+        '"useWindowScrolling" relies on ResizeObserver which is not supported by your browser. ' +
+        'Please include a polyfill, e.g., https://github.com/que-etc/resize-observer-polyfill. ' +
+        'Only handling the window.onresize event.'
+      );
+    }
+    handleWindowLayout();
+  }
+
+  function unregisterWindowHandlers() {
+    window.removeEventListener('scroll', handleScroll);
+    window.removeEventListener('touchmove', handleWindowTouchMove);
+    window.removeEventListener('wheel', handleWindowWheel);
+    if (_windowResizeObserver) {
+      _windowResizeObserver.disconnect();
+    }
+  }
+
+  React.useEffect(() => {
+    if (useWindowScrolling) {
+      registerWindowHandlers();
+    } else {
+      unregisterWindowHandlers();
+    }
+    return () => {
+      if (useWindowScrolling) {
+        unregisterWindowHandlers();
+      }
+    }
+  }, [useWindowScrolling]);
 
   const hideScrollbar =
     showsHorizontalScrollIndicator === false || showsVerticalScrollIndicator === false;
 
+  const scrollHandlers = {
+    onLayout,
+    onScroll: handleScroll,
+    onTouchMove: createPreventableScrollHandler(onTouchMove),
+    onWheel: createPreventableScrollHandler(onWheel),
+  };
+
+  // disable regular scroll handlers if window scrolling is used
+  if (useWindowScrolling) {
+    const scrollHandlerKeys = Object.keys(scrollHandlers);
+    scrollHandlerKeys.forEach((key) => {
+      scrollHandlers[key] = undefined;
+    });
+  }
+
   return (
     <View
       {...rest}
-      onScroll={handleScroll}
-      onTouchMove={createPreventableScrollHandler(onTouchMove)}
-      onWheel={createPreventableScrollHandler(onWheel)}
+      {...scrollHandlers}
       ref={useMergeRefs(scrollRef, forwardedRef)}
       style={[
         style,

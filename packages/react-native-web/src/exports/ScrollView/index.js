@@ -31,7 +31,8 @@ type ScrollViewProps = {
   refreshControl?: any,
   scrollEnabled?: boolean,
   scrollEventThrottle?: number,
-  stickyHeaderIndices?: Array<number>
+  stickyHeaderIndices?: Array<number>,
+  useWindowScrolling?: boolean,
 };
 
 const emptyObject = {};
@@ -59,6 +60,9 @@ const ScrollView = ((createReactClass({
   },
 
   getScrollableNode(): any {
+    if (this.props.useWindowScrolling) {
+      return window.document.documentElement;
+    }
     return this._scrollNodeRef;
   },
 
@@ -193,7 +197,18 @@ const ScrollView = ((createReactClass({
       />
     );
 
-    const baseStyle = horizontal ? styles.baseHorizontal : styles.baseVertical;
+    // window scrolling should not block overflow automatically as it needs to be able to grow the page.
+    const { useWindowScrolling } = other;
+    const horizontalStyle = [
+      styles.baseHorizontal,
+      useWindowScrolling ? null : styles.baseHorizontalOverflow
+    ];
+    const verticalStyle = [
+      styles.baseVertical,
+      useWindowScrolling ? null : styles.baseVerticalOverflow
+    ];
+    const baseStyle = horizontal ? horizontalStyle : verticalStyle;
+
     const pagingEnabledStyle = horizontal
       ? styles.pagingEnabledHorizontal
       : styles.pagingEnabledVertical;
@@ -302,12 +317,16 @@ const styles = StyleSheet.create({
   baseVertical: {
     ...commonStyle,
     flexDirection: 'column',
+  },
+  baseVerticalOverflow: {
     overflowX: 'hidden',
     overflowY: 'auto'
   },
   baseHorizontal: {
     ...commonStyle,
     flexDirection: 'row',
+  },
+  baseHorizontalOverflow: {
     overflowX: 'auto',
     overflowY: 'hidden'
   },
